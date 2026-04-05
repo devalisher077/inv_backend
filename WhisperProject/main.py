@@ -1,9 +1,10 @@
 from dotenv import load_dotenv
 import os
 import uuid
+import json
 import requests
-import whisper
 import subprocess
+from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,16 +16,16 @@ from docx import Document
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-SUPABASE_URL = os.getenv("SUPABASE_URL") or "https://yawykbpzxlexcxyuaake.supabase.co"
+SUPABASE_URL = os.getenv("SUPABASE_URL") 
 SUPABASE_KEY = os.getenv("SUPABASE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlhd3lrYnB6eGxleGN4eXVhYWtlIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NDYxOTM2NSwiZXhwIjoyMDkwMTk1MzY1fQ.75C-HSMLw_sdb3_vTM_Fsnhj_JXPWegskjiohCevrl8"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "AIzaSyCCS8P5F5kFXLekqMgNyTsmlqqWOLzqiRc"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 
-if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY]):
-    raise Exception("Не заданы ENV переменные")
+if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY, OPENAI_API_KEY]):
+    raise Exception("Не заданы ENV переменные (нужны SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY, OPENAI_API_KEY)")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-model = whisper.load_model("base")
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = FastAPI()
 
@@ -70,9 +71,32 @@ def extract_audio(video_path, audio_path):
 def transcribe_video(video_file):
     audio_file = video_file.replace(".mov", ".wav")
     extract_audio(video_file, audio_file)
-    result = model.transcribe(audio_file, language="ru", fp16=False)
-    os.remove(audio_file)
-    return result["text"]
+    
+    try:
+        with open(audio_file, "rb") as f:
+            response = requests.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                data={
+                    "model": WHISPER_MODEL,
+                    "language": "ru",
+                    "response_format": "json"
+                },
+                files={"file": (os.path.basename(audio_file), f, "audio/wav")},
+                timeout=120
+            )
+        
+        if response.status_code >= 400:
+            raise RuntimeError(f"Ошибка OpenAI API: {response.status_code} {response.text}")
+        
+        payload = response.json()
+        text = payload.get("text", "").strip()
+        if not text:
+            raise RuntimeError("OpenAI API вернул пустую транскрипцию")
+        return text
+    finally:
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
 
 def analyze_leadership(transcript):
     transcript = transcript[:5000]
@@ -171,17 +195,51 @@ def analyze_leadership(transcript):
             text_ai = "Ошибка AI-анализа"
 
     return text_main
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
-    text = getattr(response, "text", None)
-    if not text:
+
+
+def clean_llm_json_text(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.replace("```json", "", 1)
+        cleaned = cleaned.replace("```", "")
+    return cleaned.strip()
+
+
+def extract_essay_text(filename: str, ext: str) -> str:
+    if ext == "docx":
+        doc = Document(filename)
+        return "\n".join([p.text for p in doc.paragraphs]).strip()
+
+    if ext == "txt":
+        # Попробовать разные кодировки
+        for encoding in ['utf-8', 'cp1252', 'iso-8859-1', 'latin-1']:
+            try:
+                with open(filename, "r", encoding=encoding) as f:
+                    return f.read().strip()
+            except (UnicodeDecodeError, LookupError):
+                continue
+        # Если всё не поработало, читаем с игнорированием ошибок
+        with open(filename, "r", encoding='utf-8', errors='ignore') as f:
+            return f.read().strip()
+
+    if ext == "pdf":
         try:
-            text = response.candidates[0].content.parts[0].text
-        except:
-            return "Ошибка анализа"
-    return text.strip()
+            from pypdf import PdfReader
+        except Exception:
+            raise RuntimeError("PDF для анализа пока не поддерживается в окружении сервера. Установите pypdf или загрузите DOCX/TXT.")
+
+        reader = PdfReader(filename)
+        text_parts = []
+        for page in reader.pages:
+            text_parts.append(page.extract_text() or "")
+
+        text = "\n".join(text_parts).strip()
+        if not text:
+            raise RuntimeError("Не удалось извлечь текст из PDF.")
+        return text
+
+    raise RuntimeError(f"Неподдерживаемый формат эссе: {ext}")
+
 
 @app.post("/analyze-video")
 async def analyze_video(data: AnalyzeRequest):
@@ -223,28 +281,6 @@ async def analyze_video(data: AnalyzeRequest):
         if os.path.exists(filename):
             os.remove(filename)
         raise HTTPException(status_code=500, detail=str(e))
-    try:
-        await run_in_threadpool(download_file, url, filename)
-        if os.path.getsize(filename) > 50 * 1024 * 1024:
-            raise Exception("Файл слишком большой")
-        transcript = await run_in_threadpool(transcribe_video, filename)
-        leadership_result = await run_in_threadpool(analyze_leadership, transcript)
-        supabase.table("video_transcripts").insert({
-            "user_id": user_id,
-            "video_url": url,
-            "transcript": transcript,
-            "result_llm": leadership_result
-        }).execute()
-        os.remove(filename)
-        return {
-            "status": "ok",
-            "transcript": transcript,
-            "analysis": leadership_result
-        }
-    except Exception as e:
-        if os.path.exists(filename):
-            os.remove(filename)
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyze-essay")
 async def analyze_essay(data: AnalyzeEssayRequest):
@@ -252,27 +288,35 @@ async def analyze_essay(data: AnalyzeEssayRequest):
     if 'dropbox.com' in url and 'dl=0' in url:
         url = url.replace('dl=0', 'dl=1')
     user_id = data.userId
-    filename = f"{uuid.uuid4()}"
-    ext = url.split('.')[-1].lower()
-    if ext not in ["docx", "txt"]:
-        filename += ".txt"  # fallback
-    else:
-        filename += f".{ext}"
-    print(f"[DEBUG] Essay URL: {url}")
+    
+    # Правильно парсить расширение из URL
+    url_path = urlparse(url).path
+    ext = os.path.splitext(url_path)[1].lower().lstrip('.')
+    if ext not in ["docx", "txt", "pdf"]:
+        raise HTTPException(status_code=400, detail=f"Неподдерживаемый формат эссе: {ext or 'unknown'}")
+    
+    filename = f"{uuid.uuid4()}.{ext}"
+    print(f"[DEBUG] Essay URL: {url}, ext: {ext}")
     try:
         print("[DEBUG] Скачивание эссе...")
         await run_in_threadpool(download_file, url, filename)
         print(f"[DEBUG] Эссе скачано: {filename}, размер: {os.path.getsize(filename)} байт")
-        if filename.endswith(".docx"):
-            doc = Document(filename)
-            essay_text = "\n".join([p.text for p in doc.paragraphs])
-        else:
-            with open(filename, "r", encoding="utf-8") as f:
-                essay_text = f.read()
+
+        essay_text = await run_in_threadpool(extract_essay_text, filename, ext)
+        if not essay_text:
+            raise RuntimeError("Текст эссе пустой после обработки файла.")
+
         print(f"[DEBUG] Текст эссе: {essay_text[:100]}...")
         print("[DEBUG] Анализ эссе...")
-        essay_result = await run_in_threadpool(analyze_leadership, essay_text)
-        print(f"[DEBUG] Анализ эссе завершён: {essay_result[:100]}...")
+        essay_result_raw = await run_in_threadpool(analyze_leadership, essay_text)
+        cleaned_result = clean_llm_json_text(essay_result_raw)
+
+        try:
+            essay_result = json.loads(cleaned_result)
+        except Exception:
+            essay_result = {"raw": essay_result_raw}
+
+        print(f"[DEBUG] Анализ эссе завершён: {str(essay_result)[:100]}...")
         print("[DEBUG] Сохраняю результат эссе в Supabase...")
         supabase.table("essay_results").insert({
             "user_id": user_id,
