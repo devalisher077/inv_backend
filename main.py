@@ -16,19 +16,30 @@ from docx import Document
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL")
 SUPABASE_KEY = (
     os.getenv("SUPABASE_KEY")
     or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     or os.getenv("SUPABASE_ANON_KEY")
+    or os.getenv("VITE_SUPABASE_ANON_KEY")
 )
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("VITE_GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("VITE_OPENAI_API_KEY")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 
-if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY, OPENAI_API_KEY]):
+missing_vars = []
+if not SUPABASE_URL:
+    missing_vars.append("SUPABASE_URL (or VITE_SUPABASE_URL)")
+if not SUPABASE_KEY:
+    missing_vars.append("SUPABASE_KEY/SUPABASE_SERVICE_ROLE_KEY/SUPABASE_ANON_KEY (or VITE_SUPABASE_ANON_KEY)")
+if not GEMINI_API_KEY:
+    missing_vars.append("GEMINI_API_KEY (or VITE_GEMINI_API_KEY)")
+if not OPENAI_API_KEY:
+    missing_vars.append("OPENAI_API_KEY (or VITE_OPENAI_API_KEY)")
+
+if missing_vars:
     raise Exception(
-        "Не заданы ENV переменные (нужны SUPABASE_URL, SUPABASE_KEY/SUPABASE_SERVICE_ROLE_KEY/SUPABASE_ANON_KEY, GEMINI_API_KEY, OPENAI_API_KEY)"
+        "Не заданы ENV переменные: " + ", ".join(missing_vars)
     )
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
