@@ -1,0 +1,295 @@
+from dotenv import load_dotenv
+import os
+import uuid
+import requests
+import whisper
+import subprocess
+from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from supabase import create_client, Client
+from google import genai
+from docx import Document
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+SUPABASE_URL = os.getenv("SUPABASE_URL") or "https://yawykbpzxlexcxyuaake.supabase.co"
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlhd3lrYnB6eGxleGN4eXVhYWtlIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NDYxOTM2NSwiZXhwIjoyMDkwMTk1MzY1fQ.75C-HSMLw_sdb3_vTM_Fsnhj_JXPWegskjiohCevrl8"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "AIzaSyCCS8P5F5kFXLekqMgNyTsmlqqWOLzqiRc"
+
+if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY]):
+    raise Exception("Не заданы ENV переменные")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+model = whisper.load_model("base")
+client = genai.Client(api_key=GEMINI_API_KEY)
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class AnalyzeRequest(BaseModel):
+    videoUrl: str
+    userId: str
+
+class AnalyzeEssayRequest(BaseModel):
+    essayUrl: str
+    userId: str
+
+def download_file(url, filename):
+    for _ in range(3):
+        try:
+            response = requests.get(url, stream=True, timeout=30)
+            if response.status_code == 200:
+                with open(filename, "wb") as f:
+                    for chunk in response.iter_content(1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                return
+        except:
+            continue
+    raise Exception("Ошибка скачивания файла")
+
+def extract_audio(video_path, audio_path):
+    subprocess.run([
+        "ffmpeg", "-i", video_path,
+        "-ar", "16000",
+        "-ac", "1",
+        "-y",
+        audio_path
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def transcribe_video(video_file):
+    audio_file = video_file.replace(".mov", ".wav")
+    extract_audio(video_file, audio_file)
+    result = model.transcribe(audio_file, language="ru", fp16=False)
+    os.remove(audio_file)
+    return result["text"]
+
+def analyze_leadership(transcript):
+    transcript = transcript[:5000]
+    prompt_main = (
+        "Ты — эксперт приёмной комиссии InVision U (инновационного университета, поддерживаемого inDrive), специализирующийся на выявлении лидерского потенциала, предпринимательского мышления и способности к росту у кандидатов.\n"
+        "\n"
+        "Твоя задача — анализировать кандидатов на основе анкеты, эссе, транскрипта интервью или видеопрезентации.\n"
+        "\n"
+        " ВАЖНО: Ты НЕ принимаешь окончательное решение о зачислении. Ты создаёшь обоснованную рекомендацию и аналитический профиль кандидата для помощи комиссии.\n"
+        "\n"
+        "Суди строго по фактам, не добавляй субъективных оценок, не смягчай слабые стороны, не добавляй позитивных или обтекаемых формулировок. Говори только по существу, отмечай как сильные, так и слабые стороны кандидата.\n"
+        "\n"
+        "## ЦЕЛЬ ОЦЕНКИ\n"
+        "Выявить кандидатов с высоким потенциалом стать: лидерами, предпринимателями, инициаторами изменений (change-makers), даже если у них слабые формальные достижения, слабая самопрезентация или несовершенное эссе.\n"
+        "\n"
+        "##  ПРИНЦИПЫ\n"
+        "1. Смотри глубже текста — ищи сигналы потенциала, а не только форму.\n"
+        "2. Не наказывай за слабый язык или структуру.\n"
+        "3. Учитывай контекст (социальный, образовательный, региональный).\n"
+        "4. Выявляй 'скрытые таланты'.\n"
+        "5. Минимизируй предвзятость (гендер, регион, язык, стиль).\n"
+        "6. Учитывай, что текст может быть частично сгенерирован ИИ — ищи подлинные признаки личности.\n"
+        "\n"
+        "##  КРИТЕРИИ ОЦЕНКИ (0–10)\n"
+        "Оцени кандидата по следующим осям:\n"
+        "1. Лидерский потенциал: Инициативность, Влияние на других, Примеры действий\n"
+        "2. Предпринимательское мышление: Способность видеть возможности, Решение проблем, Самостоятельные проекты\n"
+        "3. Мотивация и смысл: Зачем кандидат хочет учиться, Есть ли внутренняя мотивация, Связь с ценностями\n"
+        "4. Способность к росту (growth mindset): Отношение к ошибкам, Обучаемость, Гибкость мышления\n"
+        "5. Социальное влияние / ценности: Желание приносить пользу, Эмпатия, Вклад в сообщество\n"
+        "6. Подлинность (authenticity): Насколько текст 'живой', Есть ли личные истории, Признаки не-ИИ мышления\n"
+        "\n"
+        "##  СКОРИНГ\n"
+        "Для каждого критерия: Дай оценку от 0 до 10 и краткое объяснение (1–2 предложения). Рассчитай общий балл (среднее) и потенциал (High / Medium / Low).\n"
+        "\n"
+        "##  ВАЖНО: ВЫЯВЛЕНИЕ СКРЫТОГО ПОТЕНЦИАЛА\n"
+        "Отдельно ответь: Есть ли признаки 'недооценённого кандидата'? (да/нет) Почему он мог бы быть упущен при классическом отборе?\n"
+        "\n"
+        "##  РИСКИ\n"
+        "Укажи: Есть ли признаки переиспользования шаблонов, AI-сгенерированного текста, 'over-polished' подачи без содержания.\n"
+        "\n"
+        "##  ФОРМАТ ОТВЕТА (СТРОГО)\n"
+        "Ответ должен быть в JSON:\n"
+        "{\n  'scores': {\n    'leadership': { 'score': X, 'reason': '' },\n    'entrepreneurship': { 'score': X, 'reason': '' },\n    'motivation': { 'score': X, 'reason': '' },\n    'growth': { 'score': X, 'reason': '' },\n    'social_impact': { 'score': X, 'reason': '' },\n    'authenticity': { 'score': X, 'reason': '' }\n  },\n  'overall_score': X,\n  'potential_level': 'High | Medium | Low',\n  'hidden_gem': {\n    'is_hidden_gem': true/false,\n    'explanation': ''\n  },\n  'risks': {\n    'ai_generated': true/false,\n    'bias_risk': true/false,\n    'other': ''\n  },\n  'final_recommendation': 'Strong Yes | Yes | Maybe | No',\n  'summary': 'Краткий вывод о кандидате (3-4 предложения)'\n}\n"
+        f"\n---\n\nАНАЛИЗИРУЙ ЭТОТ ТЕКСТ КАНДИДАТА:\n{transcript}"
+    )
+
+    prompt_ai = (
+        "Ты — эксперт по анализу текста и выявлению искусственно сгенерированного контента (LLM/AI).\n"
+        "\n"
+        "Твоя задача — определить, написан ли текст человеком или сгенерирован искусственным интеллектом.\n"
+        "\n"
+        "Проанализируй текст по следующим критериям:\n"
+        "1. Стиль и естественность: Насколько текст звучит “по-человечески”, Есть ли повторяемость или шаблонность\n"
+        "2. Логика и структура: Слишком ли идеальная структура (введение → аргументы → вывод), Есть ли неожиданные переходы или наоборот чрезмерная гладкость\n"
+        "3. Лексика: Используются ли общие, “универсальные” формулировки, Есть ли клише и типичные AI-фразы\n"
+        "4. Конкретика: Есть ли реальные примеры, личный опыт, Или текст обобщённый и абстрактный\n"
+        "5. Ошибки: Есть ли мелкие человеческие ошибки, Или текст слишком “идеальный”\n"
+        "\n"
+        "После анализа:\n"
+        "— Дай вероятность (в %) что текст написан ИИ\n"
+        "— Дай вероятность (в %) что текст написан человеком\n"
+        "— Объясни решение (3–6 пунктов)\n"
+        "— Укажи ключевые признаки, которые повлияли на решение\n"
+        "— Если возможно, выдели конкретные фрагменты текста, которые выглядят как AI\n"
+        "\n"
+        "Формат ответа:\n"
+        "Вероятность AI: XX%\n"
+        "Вероятность человек: XX%\n"
+        "Обоснование:\n"
+        "1. ...\n2. ...\n3. ...\n"
+        "Подозрительные фрагменты:\n* \"...\"\n* \"...\"\n"
+        f"\n---\n\nАНАЛИЗИРУЙ ЭТОТ ТЕКСТ:\n{transcript}"
+    )
+
+    response_main = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt_main
+    )
+    text_main = getattr(response_main, "text", None)
+    if not text_main:
+        try:
+            text_main = response_main.candidates[0].content.parts[0].text
+        except:
+            text_main = "Ошибка анализа"
+
+    response_ai = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt_ai
+    )
+    text_ai = getattr(response_ai, "text", None)
+    if not text_ai:
+        try:
+            text_ai = response_ai.candidates[0].content.parts[0].text
+        except:
+            text_ai = "Ошибка AI-анализа"
+
+    return text_main
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    text = getattr(response, "text", None)
+    if not text:
+        try:
+            text = response.candidates[0].content.parts[0].text
+        except:
+            return "Ошибка анализа"
+    return text.strip()
+
+@app.post("/analyze-video")
+async def analyze_video(data: AnalyzeRequest):
+    url = data.videoUrl
+    if 'dropbox.com' in url and 'dl=0' in url:
+        url = url.replace('dl=0', 'dl=1')
+    user_id = data.userId
+    filename = f"{uuid.uuid4()}.mov"
+    print(f"[DEBUG] Video URL: {url}")
+    try:
+        print("[DEBUG] Скачивание файла...")
+        await run_in_threadpool(download_file, url, filename)
+        print(f"[DEBUG] Файл скачан: {filename}, размер: {os.path.getsize(filename)} байт")
+        print("[DEBUG] Транскрибация...")
+        transcript = await run_in_threadpool(transcribe_video, filename)
+        print(f"[DEBUG] Транскрипция: {transcript[:100]}...")
+        print("[DEBUG] Анализ...")
+        leadership_result = await run_in_threadpool(analyze_leadership, transcript)
+        print(f"[DEBUG] Анализ завершён: {leadership_result[:100]}...")
+        print("[DEBUG] Сохраняю в Supabase...")
+        supabase.table("video_transcripts").insert({
+            "user_id": user_id,
+            "video_url": url,
+            "transcript": transcript,
+            "result_llm": leadership_result
+        }).execute()
+        print("[DEBUG] Сохранено.")
+        os.remove(filename)
+        print("[DEBUG] Временный файл удалён.")
+        return {
+            "status": "ok",
+            "transcript": transcript,
+            "analysis": leadership_result
+        }
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        if os.path.exists(filename):
+            os.remove(filename)
+        raise HTTPException(status_code=500, detail=str(e))
+    try:
+        await run_in_threadpool(download_file, url, filename)
+        if os.path.getsize(filename) > 50 * 1024 * 1024:
+            raise Exception("Файл слишком большой")
+        transcript = await run_in_threadpool(transcribe_video, filename)
+        leadership_result = await run_in_threadpool(analyze_leadership, transcript)
+        supabase.table("video_transcripts").insert({
+            "user_id": user_id,
+            "video_url": url,
+            "transcript": transcript,
+            "result_llm": leadership_result
+        }).execute()
+        os.remove(filename)
+        return {
+            "status": "ok",
+            "transcript": transcript,
+            "analysis": leadership_result
+        }
+    except Exception as e:
+        if os.path.exists(filename):
+            os.remove(filename)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/analyze-essay")
+async def analyze_essay(data: AnalyzeEssayRequest):
+    url = data.essayUrl
+    if 'dropbox.com' in url and 'dl=0' in url:
+        url = url.replace('dl=0', 'dl=1')
+    user_id = data.userId
+    filename = f"{uuid.uuid4()}"
+    ext = url.split('.')[-1].lower()
+    if ext not in ["docx", "txt"]:
+        filename += ".txt"  # fallback
+    else:
+        filename += f".{ext}"
+    print(f"[DEBUG] Essay URL: {url}")
+    try:
+        print("[DEBUG] Скачивание эссе...")
+        await run_in_threadpool(download_file, url, filename)
+        print(f"[DEBUG] Эссе скачано: {filename}, размер: {os.path.getsize(filename)} байт")
+        if filename.endswith(".docx"):
+            doc = Document(filename)
+            essay_text = "\n".join([p.text for p in doc.paragraphs])
+        else:
+            with open(filename, "r", encoding="utf-8") as f:
+                essay_text = f.read()
+        print(f"[DEBUG] Текст эссе: {essay_text[:100]}...")
+        print("[DEBUG] Анализ эссе...")
+        essay_result = await run_in_threadpool(analyze_leadership, essay_text)
+        print(f"[DEBUG] Анализ эссе завершён: {essay_result[:100]}...")
+        print("[DEBUG] Сохраняю результат эссе в Supabase...")
+        supabase.table("essay_results").insert({
+            "user_id": user_id,
+            "result_essay": essay_result
+        }).execute()
+        print("[DEBUG] Сохранено.")
+        os.remove(filename)
+        print("[DEBUG] Временный файл эссе удалён.")
+        return {
+            "status": "ok",
+            "essay_text": essay_text,
+            "analysis": essay_result
+        }
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        if os.path.exists(filename):
+            os.remove(filename)
+        raise HTTPException(status_code=500, detail=str(e))
