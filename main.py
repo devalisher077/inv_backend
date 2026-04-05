@@ -5,6 +5,7 @@ import json
 import requests
 import subprocess
 import shutil
+import base64
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -23,18 +24,38 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_KEY = (
-    os.getenv("SUPABASE_KEY")
-    or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    SUPABASE_SERVICE_ROLE_KEY
+    or os.getenv("SUPABASE_KEY")
     or os.getenv("SUPABASE_ANON_KEY")
 )
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 
+
+def is_probably_anon_supabase_key(key: str) -> bool:
+    try:
+        parts = key.split(".")
+        if len(parts) != 3:
+            return False
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
+        role = json.loads(decoded).get("role")
+        return role == "anon"
+    except Exception:
+        return False
+
 if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY, OPENAI_API_KEY]):
     raise Exception(
         "Не заданы ENV переменные (нужны SUPABASE_URL, SUPABASE_KEY/SUPABASE_SERVICE_ROLE_KEY/SUPABASE_ANON_KEY, GEMINI_API_KEY, OPENAI_API_KEY)"
+    )
+
+if is_probably_anon_supabase_key(SUPABASE_KEY):
+    raise Exception(
+        "Для backend записи в Supabase нужен SUPABASE_SERVICE_ROLE_KEY. Сейчас используется anon key, из-за этого RLS блокирует insert."
     )
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
