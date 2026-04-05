@@ -254,14 +254,12 @@ def extract_essay_text(filename: str, ext: str) -> str:
         return "\n".join([p.text for p in doc.paragraphs]).strip()
 
     if ext == "txt":
-        # Попробовать разные кодировки
         for encoding in ['utf-8', 'cp1252', 'iso-8859-1', 'latin-1']:
             try:
                 with open(filename, "r", encoding=encoding) as f:
                     return f.read().strip()
             except (UnicodeDecodeError, LookupError):
                 continue
-        # Если всё не поработало, читаем с игнорированием ошибок
         with open(filename, "r", encoding='utf-8', errors='ignore') as f:
             return f.read().strip()
 
@@ -332,7 +330,6 @@ async def analyze_essay(data: AnalyzeEssayRequest):
         url = url.replace('dl=0', 'dl=1')
     user_id = data.userId
     
-    # Правильно парсить расширение из URL
     url_path = urlparse(url).path
     ext = os.path.splitext(url_path)[1].lower().lstrip('.')
     if ext not in ["docx", "txt", "pdf"]:
