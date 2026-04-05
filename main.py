@@ -4,6 +4,7 @@ import uuid
 import json
 import requests
 import subprocess
+import shutil
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -12,6 +13,11 @@ from pydantic import BaseModel
 from supabase import create_client, Client
 from google import genai
 from docx import Document
+
+try:
+    from imageio_ffmpeg import get_ffmpeg_exe
+except Exception:
+    get_ffmpeg_exe = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -34,6 +40,27 @@ if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY, OPENAI_API_KEY]):
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = FastAPI()
+
+
+def resolve_ffmpeg_bin():
+    env_path = os.getenv("FFMPEG_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    system_bin = shutil.which("ffmpeg")
+    if system_bin:
+        return system_bin
+
+    if get_ffmpeg_exe is not None:
+        try:
+            return get_ffmpeg_exe()
+        except Exception:
+            pass
+
+    return None
+
+
+FFMPEG_BIN = resolve_ffmpeg_bin()
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,8 +98,13 @@ def download_file(url, filename):
     raise Exception("Ошибка скачивания файла")
 
 def extract_audio(video_path, audio_path):
+    if not FFMPEG_BIN:
+        raise RuntimeError(
+            "ffmpeg не найден. Установите ffmpeg в окружении или задайте FFMPEG_PATH."
+        )
+
     subprocess.run([
-        "ffmpeg", "-i", video_path,
+        FFMPEG_BIN, "-i", video_path,
         "-ar", "16000",
         "-ac", "1",
         "-y",
