@@ -16,14 +16,20 @@ from docx import Document
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-SUPABASE_URL = os.getenv("SUPABASE_URL") 
-SUPABASE_KEY = os.getenv("SUPABASE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlhd3lrYnB6eGxleGN4eXVhYWtlIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NDYxOTM2NSwiZXhwIjoyMDkwMTk1MzY1fQ.75C-HSMLw_sdb3_vTM_Fsnhj_JXPWegskjiohCevrl8"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_KEY")
+    or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 
 if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY, OPENAI_API_KEY]):
-    raise Exception("Не заданы ENV переменные (нужны SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY, OPENAI_API_KEY)")
+    raise Exception(
+        "Не заданы ENV переменные (нужны SUPABASE_URL, SUPABASE_KEY/SUPABASE_SERVICE_ROLE_KEY/SUPABASE_ANON_KEY, GEMINI_API_KEY, OPENAI_API_KEY)"
+    )
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
